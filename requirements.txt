@@ -13,6 +13,9 @@ Werkzeug
 
 # Logging and utilities
 python-decouple
+python-dotenv
+psycopg2-binary
+supabase
 
 # Production server
 gunicorn
