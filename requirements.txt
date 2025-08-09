@@ -1,0 +1,22 @@
+# Flask web framework
+Flask
+flask-cors
+
+# Image and video processing
+opencv-python
+numpy
+moviepy
+Pillow
+
+# File handling and security
+Werkzeug
+
+# Logging and utilities
+python-decouple
+
+# Production server
+gunicorn
+
+# Optional: For better performance
+imageio
+imageio-ffmpeg
