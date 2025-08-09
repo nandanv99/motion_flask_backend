@@ -9,6 +9,9 @@ import time
 import uuid
 import logging
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+from supabase import create_client
+
 
 # Import our video effects engine
 from effects_engine import EFFECT_REGISTRY, process_video_effect
@@ -16,6 +19,8 @@ from effects_engine import EFFECT_REGISTRY, process_video_effect
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -25,6 +30,16 @@ CORS(app)  # Enable CORS for all routes
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['OUTPUT_FOLDER'] = 'outputs'
+
+# Supabase configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "videos")
+supabase_client = (
+    create_client(SUPABASE_URL, SUPABASE_KEY)
+    if SUPABASE_URL and SUPABASE_KEY
+    else None
+)
 
 # Create directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -155,45 +170,64 @@ def generate_video(effect_type):
                 'error': f'Unknown effect type: {effect_type}',
                 'available_effects': list(EFFECT_REGISTRY.keys())
             }), 400
-        
+
+        # User email
+        email = request.form.get('email') or (request.json.get('email') if request.is_json else None)
+        if not email:
+            return jsonify({'success': False, 'error': 'Email is required'}), 400
+
         # Handle file upload
         if 'image' not in request.files:
             return jsonify({
                 'success': False,
                 'error': 'No image file provided'
             }), 400
-        
+
         file = request.files['image']
         if file.filename == '':
             return jsonify({
                 'success': False,
                 'error': 'No file selected'
             }), 400
-        
+
         if not allowed_file(file.filename):
             return jsonify({
                 'success': False,
                 'error': f'Invalid file type. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'
             }), 400
-        
+
         # Save uploaded file
         filename = secure_filename(file.filename)
         unique_filename = f"{uuid.uuid4().hex}_{filename}"
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         file.save(input_path)
-        
+
+        # Upload original file to Supabase
+        input_public_url = None
+        storage_folder = email.replace('@', '_')
+        if supabase_client:
+            try:
+                with open(input_path, 'rb') as f:
+                    supabase_client.storage.from_(SUPABASE_BUCKET).upload(
+                        f"{storage_folder}/input/{unique_filename}", f, {"upsert": True}
+                    )
+                input_public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(
+                    f"{storage_folder}/input/{unique_filename}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to upload original file to Supabase: {e}")
+
         # Get parameters from form data
         parameters = {}
         for key, value in request.form.items():
-            if key != 'image':  # Skip the file field
-                # Try to convert to appropriate type
+            if key not in ['image', 'email']:
                 if value.lower() in ['true', 'false']:
                     parameters[key] = value.lower() == 'true'
                 elif value.replace('.', '', 1).replace('-', '', 1).isdigit():
                     parameters[key] = float(value) if '.' in value else int(value)
                 else:
                     parameters[key] = value
-        
+
         # Generate output filename
         output_filename = f"{uuid.uuid4().hex}_{effect_type}.mp4"
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
@@ -201,26 +235,42 @@ def generate_video(effect_type):
         # Process video
         logger.info(f"Processing {effect_type} with parameters: {parameters}")
         success = process_video_effect(effect_type, input_path, output_path, parameters)
-        
+
         # Clean up input file
         try:
             os.remove(input_path)
-        except:
+        except Exception:
             pass
-        
+
         if not success:
             return jsonify({
                 'success': False,
                 'error': 'Video processing failed'
             }), 500
-        
+
+        # Upload processed video to Supabase
+        output_public_url = None
+        if supabase_client:
+            try:
+                with open(output_path, 'rb') as f:
+                    supabase_client.storage.from_(SUPABASE_BUCKET).upload(
+                        f"{storage_folder}/output/{output_filename}", f, {"upsert": True}
+                    )
+                output_public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(
+                    f"{storage_folder}/output/{output_filename}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to upload processed file to Supabase: {e}")
+
         processing_time = time.time() - start_time
-        
+
         return jsonify({
             'success': True,
             'message': 'Video generated successfully',
             'video_id': output_filename.replace('.mp4', ''),
             'download_url': f'/api/download/{output_filename}',
+            'original_url': input_public_url,
+            'public_url': output_public_url,
             'processing_time': round(processing_time, 2),
             'effect_type': effect_type,
             'parameters': parameters
